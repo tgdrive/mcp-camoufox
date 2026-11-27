@@ -11,20 +11,26 @@ import { PKG_VERSION } from "./helpers.js";
 import { scrubErrorText } from "./redact.js";
 import { camoufoxInstall } from "./install.js";
 import { processesOnProfile } from "./lifecycle.js";
-
 const restRequest = z.discriminatedUnion("cmd", [
-  z.object({ cmd: z.literal("sessions.create") }).strict(),
-  z.object({ cmd: z.literal("sessions.list") }).strict(),
-  z.object({ cmd: z.literal("sessions.destroy"), session: z.string().uuid() }).strict(),
-  z.object({
-    cmd: z.literal("request.get"),
-    url: z.url().refine(value => /^https?:\/\//i.test(value)),
-    session: z.string().uuid().optional(),
-    maxTimeout: z.number().int().min(5000).max(180000).default(60000),
-  }).strict(),
+    z.object({ cmd: z.literal("sessions.create") }).strict(),
+    z.object({ cmd: z.literal("sessions.list") }).strict(),
+    z.object({ cmd: z.literal("sessions.destroy"), session: z.string().uuid() }).strict(),
+    z.object({
+        cmd: z.literal("request.get"),
+        url: z.url().refine(value => /^https?:\/\//i.test(value)),
+        session: z.string().uuid().optional(),
+        maxTimeout: z.number().int().min(5000).max(180000).default(60000),
+    }).strict(),
+    z.object({
+        cmd: z.literal("request.fetch"),
+        url: z.url().refine(value => /^https?:\/\//i.test(value)),
+        session: z.string().uuid().optional(),
+        method: z.string().default("GET"),
+        headers: z.record(z.string(), z.string()).default({}),
+        body: z.string().default(""),
+        maxTimeout: z.number().int().min(1000).max(120000).default(30000),
+    }).strict(),
 ]);
-
-// Every remote session is a separate Bun IPC process with its own HOME/profile.
 // The parent serializes tool execution because native mouse/X11 focus is global.
 export async function startHttp() {
   const token = process.env.MCP_CAMOUFOX_API_KEY;
@@ -72,11 +78,12 @@ export async function startHttp() {
     catch (error) { await close(worker); throw error; }
     return worker;
   }
+  const CONCURRENT_SAFE = new Set(["browser_fetch"]);
   async function call(worker: Worker, name: string, args: Record<string, unknown>, signal?: AbortSignal) {
-    if (queued >= 16) throw new Error("Request queue is full");
+    if (queued >= 64) throw new Error("Request queue is full");
     queued++; worker.busy++;
     const enqueued = Date.now();
-    const work = tail.then(async () => {
+    const run = async () => {
       if (worker.closed) throw new Error("Session is closed");
       signal?.throwIfAborted();
       if (Date.now() - enqueued > 30000) throw new Error("Queue wait exceeded 30 seconds");
@@ -85,8 +92,9 @@ export async function startHttp() {
         if (result.isError && JSON.stringify(result.content).includes("so it was abandoned")) await close(worker);
         return result;
       } catch (error) { await close(worker); throw error; }
-    });
-    tail = work.catch(() => {});
+    };
+    const work = CONCURRENT_SAFE.has(name) ? run() : tail.then(run);
+    if (!CONCURRENT_SAFE.has(name)) tail = work.catch(() => {});
     try { return await work; }
     finally { queued--; worker.busy--; worker.touched = Date.now(); }
   }
@@ -124,6 +132,25 @@ export async function startHttp() {
           const worker = body.session ? rest.get(body.session) : await createWorker();
           if (!worker) return json({ status: "error", message: "Unknown session" }, 404);
           try {
+            if (body.cmd === "request.fetch") {
+              const result = await call(worker, "browser_fetch", { url: body.url, method: body.method, headers_json: JSON.stringify(body.headers || {}), body: body.body, timeout_ms: body.maxTimeout }, request.signal);
+              const text = (result.content as Array<{ type: string; text?: string }>).find(c => c.type === "text")?.text || "";
+              if (result.isError) return json({ status: "error", message: text, startTimestamp, endTimestamp: Date.now() }, 502);
+              let solution: any;
+              try { solution = JSON.parse(text); }
+              catch { return json({ status: "error", message: "Invalid browser_fetch response", startTimestamp, endTimestamp: Date.now() }, 502); }
+              const isJson = typeof solution.response !== "string";
+              const respBody = isJson ? JSON.stringify(solution.response) : solution.response;
+              const upstream = (solution.headers || {}) as Record<string, string>;
+              const headers = new Headers();
+              for (const [k, v] of Object.entries(upstream)) {
+                if (/^(content-length|transfer-encoding|content-encoding|connection)$/i.test(k)) continue;
+                try { headers.set(k, String(v)); } catch {}
+              }
+              if (isJson) headers.set("content-type", "application/json; charset=utf-8");
+              else if (!headers.get("content-type")) headers.set("content-type", "text/plain; charset=utf-8");
+              return new Response(respBody, { status: Number(solution.status) || 200, headers });
+            }
             const result = await call(worker, "solve", { url: body.url, maxTimeout: body.maxTimeout, reveal_values: true }, request.signal);
             const text = (result.content as Array<{ type: string; text?: string }>).find(c => c.type === "text")?.text || "";
             if (result.isError) return json({ status: "error", message: text, startTimestamp, endTimestamp: Date.now() }, 502);

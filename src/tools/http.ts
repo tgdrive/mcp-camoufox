@@ -228,6 +228,55 @@ regTool("http_request",
     };
   });
 
+regTool("browser_fetch",
+  "Fast in-browser fetch using the current page's browser context (same TLS/cookie fingerprint as the browser). " +
+  "Use after CF is solved. Subject to browser CORS rules, so best for same-origin/API URLs.",
+  {
+    url: z.string(),
+    method: z.string().default("GET"),
+    headers_json: z.string().default(""),
+    body: z.string().default(""),
+    timeout_ms: z.number().default(30000),
+  },
+  async ({ url, method, headers_json, body, timeout_ms }) => {
+    if (!S.browserUp) throw new Error("Browser not running. Call browser_launch/solve first.");
+    const page = getPage();
+    url = normalizeUrl(url);
+    let headers: Record<string, string> = {};
+    if (headers_json) {
+      try { headers = JSON.parse(headers_json); }
+      catch (e: any) { return { content: [{ type: "text", text: `Invalid headers_json: ${e?.message || e}` }], isError: true }; }
+    }
+    const result = await page.evaluate(async ({ url, method, headers, body, timeout_ms }) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeout_ms);
+      try {
+        const r = await fetch(url, { method, headers, body: body || undefined, signal: ctrl.signal, credentials: "include" });
+        const text = await r.text();
+        const hdrs: Record<string,string> = {};
+        r.headers.forEach((v,k)=>{ hdrs[k]=v; });
+        return { ok: true, status: r.status, url: r.url, headers: hdrs, text };
+      } catch (e:any) {
+        return { ok: false, error: String(e?.message || e) };
+      } finally { clearTimeout(t); }
+    }, { url, method, headers, body, timeout_ms });
+    if (!result.ok) return { content: [{ type: "text", text: `browser_fetch failed: ${result.error}` }], isError: true };
+    const bodyText = result.text || "";
+    let response: unknown = bodyText;
+    try { response = JSON.parse(bodyText); } catch {}
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          url: result.url,
+          status: result.status,
+          headers: result.headers || {},
+          response,
+        }),
+      }],
+    };
+  });
+
 regTool("http_session_cookies",
   "Show which browser cookies an http_request to this URL would send. Values are masked unless " +
   "reveal_values=true.",
