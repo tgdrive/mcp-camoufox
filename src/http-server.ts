@@ -1,4 +1,5 @@
 import { BrowserWorker } from "./worker-client.js";
+import { SessionGet } from "./session-get.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -41,6 +42,7 @@ export async function startHttp() {
   type Worker = {
     client: BrowserWorker; home: string;
     touched: number; busy: number; closed: boolean;
+    getter?: SessionGet;
     server?: Server; http?: WebStandardStreamableHTTPServerTransport;
   };
   const rest = new Map<string, Worker>(), mcp = new Map<string, Worker>();
@@ -91,7 +93,11 @@ export async function startHttp() {
         const result = await worker.client.callTool({ name, arguments: args }, { timeout: 200000, signal });
         if (result.isError && JSON.stringify(result.content).includes("so it was abandoned")) await close(worker);
         return result;
-      } catch (error) { await close(worker); throw error; }
+      } catch (error) {
+        // Admission failures are not worker failures: never tear down other calls.
+        if (!/Worker is busy|Fetch capacity reached/.test(String(error))) await close(worker);
+        throw error;
+      }
     };
     const work = CONCURRENT_SAFE.has(name) ? run() : tail.then(run);
     if (!CONCURRENT_SAFE.has(name)) tail = work.catch(() => {});
@@ -151,10 +157,32 @@ export async function startHttp() {
               else if (!headers.get("content-type")) headers.set("content-type", "text/plain; charset=utf-8");
               return new Response(respBody, { status: Number(solution.status) || 200, headers });
             }
-            const result = await call(worker, "solve", { url: body.url, maxTimeout: body.maxTimeout, reveal_values: true }, request.signal);
-            const text = (result.content as Array<{ type: string; text?: string }>).find(c => c.type === "text")?.text || "";
-            if (result.isError) return json({ status: "error", message: text, startTimestamp, endTimestamp: Date.now() }, 502);
-            return json({ status: "ok", message: "Challenge resolved", solution: JSON.parse(text), startTimestamp, endTimestamp: Date.now(), version: PKG_VERSION });
+            const invoke = async (name: string, args: Record<string, unknown>) => {
+              const result = await call(worker, name, args);
+              const text = (result.content as Array<{ type: string; text?: string }>).find(c => c.type === "text")?.text || "";
+              if (result.isError) throw new Error(text);
+              return JSON.parse(text);
+            };
+            worker.getter ??= new SessionGet(
+              async url => {
+                for (let attempt = 0; ; attempt++) {
+                  try { return await invoke("browser_fetch", { url, timeout_ms: 90000 }); }
+                  catch (error) {
+                    // A challenge can finish with a delayed document reload.
+                    // Retrying GET is safe; do not solve again for this race.
+                    if (attempt >= 2 || !/Execution context was destroyed/.test(String(error))) throw error;
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                  }
+                }
+              },
+              async url => { await invoke("solve", { url, maxTimeout: 90000, reveal_values: true }); },
+            );
+            // Count requests waiting for shared recovery as busy too.
+            worker.busy++;
+            try {
+              const solution = await worker.getter.get(body.url);
+              return json({ status: "ok", message: "Request completed", solution, startTimestamp, endTimestamp: Date.now(), version: PKG_VERSION });
+            } finally { worker.busy--; }
           } finally { if (!body.session) await close(worker); }
         }
         if (path === "/mcp") {
