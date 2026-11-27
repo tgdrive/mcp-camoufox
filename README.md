@@ -518,3 +518,11 @@ The server's own reads (snapshot, click checks, change detection) also run in th
 ## License
 
 MIT
+# tgdrive production fork
+
+**This fork is HTTP-only:** authenticated REST `/v1` and Streamable HTTP MCP
+`/mcp`, running on Bun. It adds automatic rendered-checkbox challenge handling
+and FlareSolverr-style cookie, user-agent, URL and HTML results.
+See [production setup and API](docs/PRODUCTION.md). The upstream documentation
+below describes the original project; its Node/npm and public stdio setup does
+not apply to this fork.

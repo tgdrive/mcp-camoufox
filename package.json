@@ -14,10 +14,12 @@
   ],
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "bun dist/index.js",
+    "start:http": "bun dist/index.js",
+    "test:production": "bun test scripts/production/",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "test": "node scripts/test.mjs",
+    "test": "bun scripts/test.mjs",
     "test:schema": "node scripts/tool-schema-snapshot.mjs",
     "test:sweep": "node scripts/test/sweep.mjs",
     "smoke:install": "node scripts/smoke-fresh-install.mjs",
@@ -56,6 +58,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.5",
     "@types/node": "^25.6.0",
     "typescript": "^6.0.2"
   },

@@ -139,6 +139,8 @@ function describeProgress(s: DownloadState): string {
 export async function ensureCamoufoxBinary(waitMs = DOWNLOAD_WAIT_MS): Promise<void> {
   const { executable } = await camoufoxInstall();
   if (existsSync(executable) && download?.state.state !== "running") return;
+  if (process.env.MCP_CAMOUFOX_BUNDLED === "1")
+    throw new Error("Bundled Camoufox executable is missing; runtime browser downloads are disabled. Rebuild the image.");
   let first = false;
   if (!download || download.state.state === "failed" || (download.state.state === "done" && !existsSync(executable))) {
     const previous = download?.state.state === "failed" ? download.state.error : "";

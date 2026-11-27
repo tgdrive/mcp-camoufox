@@ -15,7 +15,7 @@ export const server = new McpServer({
 // client gives up, and the caller learns nothing. 50s stays under the 60s most MCP
 // clients allow. A call asking for a longer wait gets that wait plus a margin.
 const DEADLINE_MS = Number(process.env.MCP_CAMOUFOX_TOOL_DEADLINE_MS) || 50000;
-const WAIT_ARGS = ["timeout", "timeout_ms", "duration_ms", "wait_ms", "step_timeout_ms"];
+const WAIT_ARGS = ["timeout", "timeout_ms", "duration_ms", "wait_ms", "step_timeout_ms", "maxTimeout"];
 // Their running time is the sum of work the caller chose, or a first-run download.
 const LONG_RUNNING = new Set(["browser_launch", "chatgpt_generate_image", "chatgpt_generate_batch", "workflow_run",
   "batch_actions", "login_classic", "type_text", "humanize_type", "mouse_replay", "session_warmup", "os_click_xy"]);
@@ -66,10 +66,10 @@ function guarded(name: string, handler: Function) {
 // Same signature as server.tool(name, description, schema, handler) — the schema
 // is kept so a workflow step gets the same zod validation + defaults a real MCP
 // call would get, instead of handlers seeing undefined for omitted params.
-export const toolRegistry = new Map<string, { schema: any; handler: Function }>();
+export const toolRegistry = new Map<string, { description: string; schema: any; handler: Function }>();
 // Typed as server.tool itself so every handler keeps its inferred argument types.
 export const regTool: typeof server.tool = ((name: any, description: any, schema: any, handler: any) => {
   const wrapped = guarded(name, handler);
-  toolRegistry.set(name, { schema, handler: wrapped });
+  toolRegistry.set(name, { description, schema, handler: wrapped });
   return (server as any).tool(name, description, schema, wrapped);
 }) as any;

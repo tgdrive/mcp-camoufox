@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * MCP Camoufox — stealth browser automation MCP server.
+ * MCP Camoufox — authenticated HTTP MCP and REST browser server on Bun.
  *
- * MCP stdio tools: browser control (Camoufox/Firefox via Playwright's
+ * Tools: browser control (Camoufox/Firefox via Playwright's
  * Juggler) plus a browserless HTTP path that presents the same Firefox TLS
  * fingerprint, so routine fetching never has to pay for a browser launch.
  *
@@ -12,13 +12,11 @@
  *   server.ts    the McpServer instance and the regTool registry
  *   tools/*.ts   the tools themselves, grouped by area
  *
- * Install:  npx -y mcp-camoufox@latest
- * Usage:    claude mcp add camoufox -- npx -y mcp-camoufox@latest
+ * Usage: bun dist/index.js (requires MCP_CAMOUFOX_API_KEY).
+ * --worker is private gateway IPC, not a public stdio transport.
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { server } from "./server.js";
-import { shutdownBrowser, warmBrowserModules } from "./tools/browser.js";
+import { shutdownBrowser } from "./tools/browser.js";
 import { stopDownload } from "./install.js";
 
 // Each tool module registers itself on import. Import order only affects the
@@ -32,20 +30,20 @@ import "./tools/extract.js";
 import "./tools/session.js";
 import "./tools/http.js";
 import "./tools/ergonomics.js";
+import "./tools/solver.js";
 
 async function main() {
-  // Load the browser libraries once the handshake is over, so neither initialize nor
-  // the first browser_launch waits for them. A failure here is reported by browser_launch.
-  server.server.oninitialized = () => { setTimeout(() => { warmBrowserModules().catch(() => {}); }, 200).unref(); };
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("[mcp-camoufox] Server running on stdio...");
+  if (!process.argv.includes("--worker")) {
+    const { startHttp } = await import("./http-server.js");
+    await startHttp();
+    return;
+  }
+  const { startWorker } = await import("./worker.js");
+  startWorker(async () => { stopDownload(); await shutdownBrowser(); });
 }
 
-// Leave nothing behind however the client goes away. A client that crashes only
-// closes our stdin, and the browser's pipes then keep this process alive for ever
-// with the browser still running. A signal used to exit at once and leave the temp
-// profile on disk.
+// An IPC disconnect means the gateway disappeared. Close the browser even
+// though its pipes would otherwise keep this worker alive.
 let exiting = false;
 function exitCleanly() {
   if (exiting) return;
@@ -55,11 +53,12 @@ function exitCleanly() {
   stopDownload();
   shutdownBrowser().catch(() => {}).finally(() => process.exit(0));
 }
-process.on("SIGINT", exitCleanly);
-process.on("SIGTERM", exitCleanly);
-process.on("SIGHUP", exitCleanly);
-process.stdin.on("end", exitCleanly);
-process.stdin.on("close", exitCleanly);
+if (process.argv.includes("--worker")) {
+  process.on("SIGINT", exitCleanly);
+  process.on("SIGTERM", exitCleanly);
+  process.on("SIGHUP", exitCleanly);
+  process.on("disconnect", exitCleanly);
+}
 
 main().catch((err) => {
   console.error("[mcp-camoufox] Fatal:", err);

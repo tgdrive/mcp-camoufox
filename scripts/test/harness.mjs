@@ -1,10 +1,10 @@
-// Shared test harness: drives dist/index.js over real MCP stdio, serves local
-// fixtures, and reports PASS/FAIL. No dependencies beyond Node.
-import { spawn } from "child_process";
+// Shared test harness: drives isolated browser workers over Bun IPC and serves
+// local fixtures. The rpc adapter preserves existing suite assertions.
+import { BrowserWorker } from "../../dist/worker-client.js";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "fs";
 import http from "http";
 import { homedir, platform, tmpdir } from "os";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join } from "path";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -21,7 +21,7 @@ export function camoufoxCache(home) {
  *  can reach ~/.camoufox-mcp and the real logins in it. */
 export function sandboxHome() {
   const home = mkdtempSync(join(tmpdir(), "mcp-camoufox-home-"));
-  const real = camoufoxCache(homedir());
+  const real = process.env.CAMOUFOX_INSTALL_DIR || camoufoxCache(homedir());
   if (existsSync(real)) {
     const link = camoufoxCache(home);
     mkdirSync(dirname(link), { recursive: true });
@@ -35,31 +35,15 @@ export function sandboxHome() {
  *  "[IMAGE …]" when it returned image content. */
 export async function startServer(distPath = DIST, { home: givenHome = null } = {}) {
   const home = givenHome || sandboxHome();
-  const proc = spawn("node", [distPath], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, HOME: home, USERPROFILE: home } });
-  proc.on("exit", () => { try { rmSync(home, { recursive: true, force: true }); } catch {} });
-  let buf = "", stderr = "";
-  const pending = new Map();
-  proc.stderr.on("data", d => { stderr += d.toString(); });
-  proc.stdout.on("data", d => {
-    buf += d.toString();
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i); buf = buf.slice(i + 1);
-      if (!line.trim()) continue;
-      let m; try { m = JSON.parse(line); } catch { continue; }
-      if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
-    }
-  });
-  let id = 0;
-  // A call that never answers fails after RPC_TIMEOUT_MS instead of hanging the suite, so
-  // a hang shows up as one failed check with a name.
-  const RPC_TIMEOUT_MS = Number(process.env.MCPC_RPC_TIMEOUT_MS) || 180000;
-  const rpc = (method, params) => new Promise(res => {
-    const i = ++id;
-    const timer = setTimeout(() => { if (pending.delete(i)) res({ error: { message: `no answer to ${method} ${params?.name || ""} within ${RPC_TIMEOUT_MS / 1000}s` } }); }, RPC_TIMEOUT_MS);
-    pending.set(i, m => { clearTimeout(timer); res(m); });
-    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: i, method, params }) + "\n");
-  });
+  const worker = new BrowserWorker({ ...process.env, HOME: home, USERPROFILE: home }, pathToFileURL(distPath));
+  await worker.connect();
+  const rpc = async (method, params) => {
+    try {
+      if (method === "tools/list") return { result: await worker.listTools() };
+      if (method === "tools/call") return { result: await worker.callTool(params, { timeout: Number(process.env.MCPC_RPC_TIMEOUT_MS) || 180000 }) };
+      throw new Error(`Unsupported test RPC: ${method}`);
+    } catch (error) { return { error: { message: String(error?.message || error) } }; }
+  };
   const call = async (name, args = {}) => {
     const r = await rpc("tools/call", { name, arguments: args });
     if (r.error) return `RPC_ERROR: ${r.error.message}`;
@@ -68,9 +52,10 @@ export async function startServer(distPath = DIST, { home: givenHome = null } = 
     const img = items.find(c => c.type === "image");
     return (r.result?.isError ? "IS_ERROR: " : "") + (img ? `[IMAGE ${img.mimeType} b64len=${img.data.length}]\n` : "") + text;
   };
-  await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "suite", version: "1" } });
-  proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n");
-  return { proc, rpc, call, home, stderr: () => stderr, kill: () => proc.kill() };
+  return { proc: worker.process, rpc, call, home, stderr: () => "", kill: async () => {
+    await worker.close();
+    try { rmSync(home, { recursive: true, force: true }); } catch {}
+  } };
 }
 
 /** Minimal fixture server. `routes` maps a pathname to (req,res,state)=>void.

@@ -298,11 +298,14 @@ const linuxBackend: Backend = {
       return { x: 0, y: 0, w: 0, h: 0, error: "`xdotool` not found — install it (e.g. apt install xdotool); X11 session required (Wayland unsupported)." };
     const wid = await linuxWindowId(pid);
     if (!wid) return { x: 0, y: 0, w: 0, h: 0, error: "no on-screen window for pid (headed X11 session required)" };
-    const g = await shOut("xdotool", ["getwindowgeometry", "--shell", wid]);
-    const x = parseInt((g.match(/\bX=(-?\d+)/) || [])[1] || "0", 10);
-    const y = parseInt((g.match(/\bY=(-?\d+)/) || [])[1] || "0", 10);
-    const w = parseInt((g.match(/WIDTH=(\d+)/) || [])[1] || "0", 10);
-    const h = parseInt((g.match(/HEIGHT=(\d+)/) || [])[1] || "0", 10);
+    // Reparenting window managers make xdotool double-count frame offsets.
+    const g = await shOut("xwininfo", ["-id", wid]);
+    const x = Number(g.match(/Absolute upper-left X:\s*(-?\d+)/)?.[1]);
+    const y = Number(g.match(/Absolute upper-left Y:\s*(-?\d+)/)?.[1]);
+    const w = Number(g.match(/Width:\s*(\d+)/)?.[1]);
+    const h = Number(g.match(/Height:\s*(\d+)/)?.[1]);
+    if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0)
+      return { x: 0, y: 0, w: 0, h: 0, error: "xwininfo could not read absolute client geometry (install x11-utils)" };
     (linuxBackend as any)._wid = wid;
     return { x, y, w, h };
   },
@@ -330,6 +333,15 @@ function backendFor(): Backend | null {
   if (process.platform === "win32") return winBackend;
   if (process.platform === "linux") return linuxBackend;
   return null;
+}
+
+export async function nativeViewport(profileDir: string, innerH: number) {
+  const be = backendFor();
+  const pid = await be?.findPid(profileDir);
+  if (!be || !pid) throw new Error("A headed browser and native input backend are required");
+  const geom = await be.geom(pid);
+  if (geom.error) throw new Error(geom.error);
+  return { left: geom.x, top: geom.y + Math.max(0, geom.h - innerH), width: geom.w, height: innerH };
 }
 
 /**
